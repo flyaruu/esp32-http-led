@@ -6,20 +6,25 @@
 
 extern crate alloc;
 use core::mem::MaybeUninit;
-use embassy_executor::Executor;
+use embassy_executor::{Executor, task};
 use embassy_net::{Config, Stack, StackResources};
 use embassy_time::Duration;
+use embedded_graphics::{pixelcolor::{Rgb565, RgbColor}, mono_font::{MonoTextStyle, ascii::FONT_10X20}, text::{Text, Alignment}, geometry::Point, Drawable, draw_target::DrawTarget};
 use esp_backtrace as _;
+use esp_println::println;
 use esp_wifi::{EspWifiInitFor, initialize, wifi::WifiStaDevice};
-use hal::{clock::ClockControl, peripherals::Peripherals, prelude::*, IO, timer::TimerGroup, embassy, Rng};
+use hal::{clock::ClockControl, peripherals::Peripherals, prelude::*, IO, timer::TimerGroup, embassy, Rng, gdma::Gdma, spi::master::Spi, gpio::{NO_PIN, Output, PushPull, Gpio6}, dma::DmaPriority, Delay};
 use static_cell::make_static;
 use esp_backtrace as _;
+use hal::spi::master::prelude::*;
+use t_display_s3_amoled::rm67162::{Orientation, dma::RM67162Dma};
 
 
 use crate::{net::{net_task, connection}, web::web_task};
 
 mod net;
 mod web;
+mod shape;
 
 #[global_allocator]
 static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
@@ -49,6 +54,71 @@ fn main() -> ! {
     log::info!("Logger is setup");
 
     let io = IO::new(peripherals.GPIO,peripherals.IO_MUX);
+
+    let mut delay = Delay::new(&clocks);
+    let mut led = io.pins.gpio38.into_push_pull_output();
+    //let user_btn = io.pins.gpio21.into_pull_down_input();
+    //let boot0_btn = io.pins.gpio0.into_pull_up_input(); // default pull up
+
+    led.set_high().unwrap();
+
+    println!("GPIO init OK");
+
+    println!("init display");
+
+    let sclk = io.pins.gpio47;
+    let rst = io.pins.gpio17;
+    let cs = io.pins.gpio6;
+
+    let d0 = io.pins.gpio18;
+    let d1 = io.pins.gpio7;
+    let d2 = io.pins.gpio48;
+    let d3 = io.pins.gpio5;
+
+    let mut cs = cs.into_push_pull_output();
+    cs.set_high().unwrap();
+
+    let mut rst = rst.into_push_pull_output();
+
+    let dma = Gdma::new(peripherals.DMA);
+    let dma_channel = dma.channel0;
+
+    // Descriptors should be sized as (BUFFERSIZE / 4092) * 3
+    let descriptors = make_static!([0u32; 12]);
+    let spi = Spi::new_half_duplex(
+        peripherals.SPI2, // use spi2 host
+        Some(sclk),
+        Some(d0),
+        Some(d1),
+        Some(d2),
+        Some(d3),
+        NO_PIN,       // Some(cs), NOTE: manually control cs
+        75_u32.MHz(), // max 75MHz
+        hal::spi::SpiMode::Mode0,
+        &clocks,
+    )
+    .with_dma(dma_channel.configure(false, descriptors, &mut [], DmaPriority::Priority0));
+
+    let mut display = t_display_s3_amoled::rm67162::dma::RM67162Dma::new(spi, cs);
+    display.reset(&mut rst, &mut delay).unwrap();
+    display.init(&mut delay).unwrap();
+    display
+        .set_orientation(Orientation::LandscapeFlipped)
+        .unwrap();
+
+    display.clear(Rgb565::YELLOW).unwrap();
+    println!("screen init ok");
+
+    let character_style = MonoTextStyle::new(&FONT_10X20, Rgb565::RED);
+    Text::with_alignment(
+        "Hello,\nRust World!",
+        Point::new(300, 20),
+        character_style,
+        Alignment::Center,
+    )
+    .draw(&mut display)
+    .unwrap();
+
 
     hal::interrupt::enable(hal::peripherals::Interrupt::GPIO, hal::interrupt::Priority::Priority1).unwrap();
     let executor = make_static!(Executor::new());
@@ -91,5 +161,12 @@ fn main() -> ! {
         spawner.spawn(connection(controller)).unwrap();
         spawner.spawn(net_task(stack)).unwrap();
         spawner.spawn(web_task(stack,pico_config)).unwrap();
+        spawner.spawn(graphics(display)).unwrap();
     })
+}
+
+
+#[task]
+async fn graphics(mut display: RM67162Dma<'static,Gpio6<Output<PushPull>>>) {
+
 }

@@ -32,3 +32,5 @@ picoserve = "0.3.0"
 
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.108", features = ["alloc"], default-features = false }
+embedded-graphics = "0.8.1"
+t-display-s3-amoled = { git="https://github.com/flyaruu/t-display-s3-amoled-rs.git", rev="b888f9f"}

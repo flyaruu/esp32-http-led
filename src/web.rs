@@ -2,7 +2,9 @@ use embassy_net::Stack;
 use embassy_time::{Duration, Timer};
 use esp_println::println;
 use esp_wifi::wifi::{WifiDevice, WifiStaDevice};
-use picoserve::{Router, routing::get, response::IntoResponse};
+use picoserve::{Router, routing::{get, post}, response::IntoResponse};
+
+use crate::shape::Shape;
 
 struct EmbassyTimer;
 
@@ -19,6 +21,7 @@ impl picoserve::Timer for EmbassyTimer {
     }
 }
 
+pub struct WebState {}
 
 #[embassy_executor::task]
 pub async fn web_task(
@@ -62,14 +65,17 @@ pub async fn web_task(
 
         let app = Router::new()
             .route("/", get(get_root))
+            .route("/shape", post(post_shape))
         ;
-        match picoserve::serve(
+        let mut web_state = WebState{};
+        match picoserve::serve_with_state(
             &app,
             EmbassyTimer,
             config,
             &mut [0; 2048],
             socket_rx,
             socket_tx,
+            &web_state
             )
         .await
         {
@@ -89,4 +95,8 @@ async fn get_root()-> impl IntoResponse {
     (("Connection","Close"),"hello world!")
 }
 
+async fn post_shape(shape: Shape)-> impl IntoResponse {
+    println!("Shape was: {:?}",shape);
+    (("Connection","Close"),"hello shape!")
+}
 
