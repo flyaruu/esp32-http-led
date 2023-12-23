@@ -1,10 +1,12 @@
+use alloc::sync::Arc;
 use embassy_net::Stack;
+use embassy_sync::{pubsub::Publisher, blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
 use embassy_time::{Duration, Timer};
 use esp_println::println;
 use esp_wifi::wifi::{WifiDevice, WifiStaDevice};
-use picoserve::{Router, routing::{get, post}, response::IntoResponse};
+use picoserve::{Router, routing::{get, post}, response::IntoResponse, extract::State};
 
-use crate::shape::Shape;
+use crate::{shape::{Shape, Shapes}, QUEUE_CAP, SUBS_CAP, PUBS_CAP};
 
 struct EmbassyTimer;
 
@@ -21,15 +23,24 @@ impl picoserve::Timer for EmbassyTimer {
     }
 }
 
-pub struct WebState {}
+
+#[derive(Clone)]
+pub struct WebState {
+    publisher: Arc<Mutex<NoopRawMutex,Publisher<'static, NoopRawMutex,Shape, QUEUE_CAP,SUBS_CAP,PUBS_CAP>>>,
+}
 
 #[embassy_executor::task]
 pub async fn web_task(
     stack: &'static Stack<WifiDevice<'static, WifiStaDevice>>,
     config: &'static picoserve::Config<Duration>,
+    publisher: Publisher<'static, NoopRawMutex,Shape, QUEUE_CAP,SUBS_CAP,PUBS_CAP>,
 ) -> ! {
     let mut rx_buffer = [0; 1024];
     let mut tx_buffer = [0; 1024];
+
+    let web_state = WebState{
+        publisher: Arc::new(Mutex::new(publisher))
+    };
 
     loop {
         if stack.is_link_up() {
@@ -66,8 +77,9 @@ pub async fn web_task(
         let app = Router::new()
             .route("/", get(get_root))
             .route("/shape", post(post_shape))
+            .route("/shapes", post(post_shapes))
         ;
-        let mut web_state = WebState{};
+
         match picoserve::serve_with_state(
             &app,
             EmbassyTimer,
@@ -95,8 +107,24 @@ async fn get_root()-> impl IntoResponse {
     (("Connection","Close"),"hello world!")
 }
 
-async fn post_shape(shape: Shape)-> impl IntoResponse {
+async fn post_shape(State(state): State<WebState>, shape: Shape)-> impl IntoResponse {
     println!("Shape was: {:?}",shape);
+    state.publisher
+        .lock()
+        .await
+        .publish(shape)
+        .await;
     (("Connection","Close"),"hello shape!")
 }
 
+async fn post_shapes(State(state): State<WebState>, Shapes(shapes): Shapes)-> impl IntoResponse {
+    println!("Shape was: {:?}",shapes);
+    for shape in shapes {
+        state.publisher
+        .lock()
+        .await
+        .publish(shape)
+        .await;
+    }
+    (("Connection","Close"),"hello shape!")
+}

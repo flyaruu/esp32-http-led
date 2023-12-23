@@ -8,8 +8,9 @@ extern crate alloc;
 use core::mem::MaybeUninit;
 use embassy_executor::{Executor, task};
 use embassy_net::{Config, Stack, StackResources};
+use embassy_sync::{pubsub::{PubSubChannel, Subscriber}, blocking_mutex::raw::NoopRawMutex};
 use embassy_time::Duration;
-use embedded_graphics::{pixelcolor::{Rgb565, RgbColor}, mono_font::{MonoTextStyle, ascii::FONT_10X20}, text::{Text, Alignment}, geometry::Point, Drawable, draw_target::DrawTarget};
+use embedded_graphics::{pixelcolor::{Rgb565, RgbColor}, mono_font::{MonoTextStyle, ascii::FONT_10X20}, text::{Text, Alignment}, geometry::{Point, Size}, Drawable, draw_target::DrawTarget, primitives::{Triangle, Primitive, PrimitiveStyleBuilder, Ellipse}};
 use esp_backtrace as _;
 use esp_println::println;
 use esp_wifi::{EspWifiInitFor, initialize, wifi::WifiStaDevice};
@@ -20,11 +21,16 @@ use hal::spi::master::prelude::*;
 use t_display_s3_amoled::rm67162::{Orientation, dma::RM67162Dma};
 
 
-use crate::{net::{net_task, connection}, web::web_task};
+use crate::{net::{net_task, connection}, web::web_task, shape::Shape};
 
 mod net;
 mod web;
 mod shape;
+
+pub const QUEUE_CAP: usize = 5;
+pub const SUBS_CAP: usize = 2;
+pub const PUBS_CAP: usize = 2;
+
 
 #[global_allocator]
 static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
@@ -103,10 +109,10 @@ fn main() -> ! {
     display.reset(&mut rst, &mut delay).unwrap();
     display.init(&mut delay).unwrap();
     display
-        .set_orientation(Orientation::LandscapeFlipped)
+        .set_orientation(Orientation::Portrait)
         .unwrap();
 
-    display.clear(Rgb565::YELLOW).unwrap();
+    display.clear(Rgb565::BLACK).unwrap();
     println!("screen init ok");
 
     let character_style = MonoTextStyle::new(&FONT_10X20, Rgb565::RED);
@@ -119,8 +125,16 @@ fn main() -> ! {
     .draw(&mut display)
     .unwrap();
 
+    // create pub sub
+    // pass publisher -> web
+    // pass subscriber -> graphics
+    
+    let channel: &mut PubSubChannel<NoopRawMutex, Shape, QUEUE_CAP, SUBS_CAP, PUBS_CAP> = make_static!(PubSubChannel::new());
 
-    hal::interrupt::enable(hal::peripherals::Interrupt::GPIO, hal::interrupt::Priority::Priority1).unwrap();
+    let publisher = channel.publisher().unwrap();
+    let subscriber = channel.subscriber().unwrap();
+
+    // hal::interrupt::enable(hal::peripherals::Interrupt::GPIO, hal::interrupt::Priority::Priority1).unwrap();
     let executor = make_static!(Executor::new());
     let timer_group = TimerGroup::new(peripherals.TIMG0, &clocks);    
     // let timer = TimerGroup::new(peripherals.TIMG1, &clocks).timer0;
@@ -160,13 +174,42 @@ fn main() -> ! {
     executor.run(|spawner| {
         spawner.spawn(connection(controller)).unwrap();
         spawner.spawn(net_task(stack)).unwrap();
-        spawner.spawn(web_task(stack,pico_config)).unwrap();
-        spawner.spawn(graphics(display)).unwrap();
+        spawner.spawn(web_task(stack,pico_config,publisher)).unwrap();
+        spawner.spawn(graphics(display,subscriber)).unwrap();
     })
 }
 
 
 #[task]
-async fn graphics(mut display: RM67162Dma<'static,Gpio6<Output<PushPull>>>) {
+async fn graphics(mut display: RM67162Dma<'static,Gpio6<Output<PushPull>>>, mut subscriber: Subscriber<'static, NoopRawMutex, Shape,QUEUE_CAP,SUBS_CAP,PUBS_CAP>) {
 
+    let style = PrimitiveStyleBuilder::new()
+        .fill_color(Rgb565::GREEN)
+        .build();
+    let ellipse_style = PrimitiveStyleBuilder::new()
+        .fill_color(Rgb565::YELLOW)
+        .build();
+
+    loop {
+        let msg = subscriber.next_message().await;
+        match msg {
+            embassy_sync::pubsub::WaitResult::Lagged(_) => {},
+            embassy_sync::pubsub::WaitResult::Message(shape) => {
+                match shape {
+                    Shape::Triangle { a, b, c } => {
+                        Triangle::new(Point::new(a.x, a.y), Point::new(b.x, b.y), Point::new(c.x, c.y))
+                        .into_styled(style)
+                        .draw(&mut display)
+                        .unwrap();
+                    },
+                    Shape::Ellipse { top_left, size } => {
+                        Ellipse::new(Point::new(top_left.x, top_left.y), Size::new(size.x,size.y))
+                            .into_styled(ellipse_style)
+                            .draw(&mut display)
+                            .unwrap();
+                    },
+                }
+            },
+        }
+    }
 }
